@@ -287,6 +287,7 @@ config ARCH_MSM8974
 	select ARCH_WANT_KMAP_ATOMIC_FLUSH
 	select KRAIT_REGULATOR
 	select ENABLE_VMALLOC_SAVINGS
+	select HAS_MACH_MEMUTILS
 
 config ARCH_APQ8084
 	bool "APQ8084"
@@ -1885,6 +1886,18 @@ config MSM_DEVFREQ_CPUBW
 	  agnostic interface to so that some of the devfreq governors can be
 	  shared across SoCs.
 
+config CPU_VOLTAGE_TABLE
+	bool "Enable CPU Voltage Table via sysfs for adjustements"
+	default n
+	help
+	  DTS based kernel User Votlage Control
+
+config FORCE_FAST_CHARGE
+	bool "Force faster charge rate for USB"
+	default y
+	help
+	  This allows users to override default charge rate up to 900mA on USB
+
 config MSM_AVS_HW
 	bool "Enable Adaptive Voltage Scaling (AVS)"
 	default n
@@ -3072,6 +3085,12 @@ config KRAIT_REGULATOR
 	 line from the PMIC. This supply line is powered by multiple
 	 regulators running in ganged mode inside the PMIC. Enable
 	 this option to support such configurations.
+
+config HAS_MACH_MEMUTILS
+	default y
+	bool "Motorola MSM memcpy enhancements"
+	help
+	Faster memcpy performance for Krait
 endif
 
 config KERNEL_TEXT_MPU_PROT

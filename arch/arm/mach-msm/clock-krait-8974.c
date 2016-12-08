@@ -22,6 +22,10 @@
 #include <linux/of.h>
 #include <linux/cpumask.h>
 
+#ifdef CONFIG_CPU_VOLTAGE_TABLE
+#include <linux/cpufreq.h>
+#endif
+
 #include <asm/cputype.h>
 
 #include <mach/rpm-regulator-smd.h>
@@ -578,10 +582,10 @@ static void krait_update_uv(int *uv, int num, int boost_uv)
 		for (i = 0; i < num; i++)
 			uv[i] = max(1150000, uv[i]);
 	};
-	#ifdef CONFIG_VENDOR_EDIT
-	//boost krait voltage by 50 mV 
-	enable_boost = 1; //CASE ID: 01694672
-	#endif
+	/* #ifdef CONFIG_VENDOR_EDIT
+	//boost krait voltage by 50 mV for testing 
+	enable_boost = 1; //qcom patch, CASE ID: 01694672, Zhilong.Zhang@OnlineRd.Driver, 2014/09/19, Modify for solve the problem of Kernel NULL pointer
+	#endif */
 
 	if (enable_boost) {
 		for (i = 0; i < num; i++)
@@ -593,6 +597,86 @@ static char table_name[] = "qcom,speedXX-pvsXX-bin-vXX";
 module_param_string(table_name, table_name, sizeof(table_name), S_IRUGO);
 static unsigned int pvs_config_ver;
 module_param(pvs_config_ver, uint, S_IRUGO);
+
+#ifdef CONFIG_CPU_VOLTAGE_TABLE
+
+#define CPU_VDD_MIN	 475
+#define CPU_VDD_MAX	1450
+
+extern bool is_used_by_scaling(unsigned int freq);
+
+static unsigned int cnt;
+
+ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	int i, freq, len = 0;
+	/* use only master core 0 */
+	int num_levels = cpu_clk[0]->vdd_class->num_levels;
+
+	/* sanity checks */
+	if (num_levels < 0)
+		return -EINVAL;
+
+	if (!buf)
+		return -EINVAL;
+
+	/* format UV_mv table */
+	for (i = 0; i < num_levels; i++) {
+		/* show only those used in scaling */
+		if (!is_used_by_scaling(freq = cpu_clk[0]->fmax[i] / 1000))
+			continue;
+
+		len += sprintf(buf + len, "%dmhz: %u mV\n", freq / 1000,
+			       cpu_clk[0]->vdd_class->vdd_uv[i] / 1000);
+	}
+	return len;
+}
+
+ssize_t store_UV_mV_table(struct cpufreq_policy *policy, char *buf,
+				size_t count)
+{
+	int i, j;
+	int ret = 0;
+	unsigned int val;
+	char size_cur[8];
+	/* use only master core 0 */
+	int num_levels = cpu_clk[0]->vdd_class->num_levels;
+
+	if (cnt) {
+		cnt = 0;
+		return -EINVAL;
+	}
+
+	/* sanity checks */
+	if (num_levels < 0)
+		return -1;
+
+	for (i = 0; i < num_levels; i++) {
+		if (!is_used_by_scaling(cpu_clk[0]->fmax[i] / 1000))
+			continue;
+
+		ret = sscanf(buf, "%u", &val);
+		if (!ret)
+			return -EINVAL;
+
+		/* bounds check */
+		val = min( max((unsigned int)val, (unsigned int)CPU_VDD_MIN),
+			(unsigned int)CPU_VDD_MAX);
+
+		/* apply it to all available cores */
+		for (j = 0; j < NR_CPUS; j++)
+			cpu_clk[j]->vdd_class->vdd_uv[i] = val * 1000;
+
+		/* Non-standard sysfs interface: advance buf */
+		ret = sscanf(buf, "%s", size_cur);
+		cnt = strlen(size_cur);
+		buf += cnt + 1;
+	}
+	pr_info("krait: regulator: user voltage table modified!\n");
+
+	return ret;
+}
+#endif
 
 static int clock_krait_8974_driver_probe(struct platform_device *pdev)
 {
@@ -708,11 +792,14 @@ static int clock_krait_8974_driver_probe(struct platform_device *pdev)
 			rows = ret;
 		}
 	}
-#ifdef CONFIG_VENDOR_EDIT//CASE ID: 01694672, solve the problem of Kernel NULL pointer
+/* #ifdef CONFIG_VENDOR_EDIT//qcom patch, CASE ID: 01694672, Zhilong.Zhang@OnlineRd.Driver, 2014/09/19, Modify for solve the problem of Kernel NULL pointer
     krait_update_uv(uv, rows, pvs ? 50000 : 0);
-#else
+#else */
+
+    /* Nimit: Remove overvolting and bring things back to normal*/
     krait_update_uv(uv, rows, pvs ? 25000 : 0);
-#endif
+// #endif
+		//krait_update_uv(uv, rows, pvs ? 25000 : 0);
 
 
 	if (clk_init_vdd_class(dev, &krait0_clk.c, rows, freq, uv, ua))
@@ -813,7 +900,7 @@ static int __init clock_krait_8974_init(void)
 {
 	return platform_driver_register(&clock_krait_8974_driver);
 }
-module_init(clock_krait_8974_init);
+arch_initcall(clock_krait_8974_init);
 
 static void __exit clock_krait_8974_exit(void)
 {

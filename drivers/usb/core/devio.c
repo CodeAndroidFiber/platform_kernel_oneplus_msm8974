@@ -616,7 +616,7 @@ static int checkintf(struct dev_state *ps, unsigned int ifnum)
 	if (test_bit(ifnum, &ps->ifclaimed))
 		return 0;
 	/* if not yet claimed, claim it for the driver */
-	dev_warn(&ps->dev->dev, "usbfs: process %d (%s) did not claim "
+	dev_dbg(&ps->dev->dev, "usbfs: process %d (%s) did not claim "
 		 "interface %u before use\n", task_pid_nr(current),
 		 current->comm, ifnum);
 	return claimintf(ps, ifnum);
@@ -1035,10 +1035,11 @@ static int proc_getdriver(struct dev_state *ps, void __user *arg)
 
 static int proc_connectinfo(struct dev_state *ps, void __user *arg)
 {
-	struct usbdevfs_connectinfo ci = {
-		.devnum = ps->dev->devnum,
-		.slow = ps->dev->speed == USB_SPEED_LOW
-	};
+	struct usbdevfs_connectinfo ci;
+
+	memset(&ci, 0, sizeof(ci));
+	ci.devnum = ps->dev->devnum;
+	ci.slow = ps->dev->speed == USB_SPEED_LOW;
 
 	if (copy_to_user(arg, &ci, sizeof(ci)))
 		return -EFAULT;

@@ -42,6 +42,10 @@
 #include <asm/div64.h>
 #endif
 
+#ifdef CONFIG_CPU_VOLTAGE_TABLE
+static struct cpufreq_frequency_table *dts_freq_table;
+#endif
+
 static DEFINE_MUTEX(l2bw_lock);
 
 static struct clk *cpu_clk[NR_CPUS];
@@ -53,6 +57,7 @@ static unsigned int *l2_khz;
 static bool is_clk;
 static bool is_sync;
 static unsigned long *mem_bw;
+static bool hotplug_ready;
 
 struct cpufreq_work_struct {
 	struct work_struct work;
@@ -312,18 +317,11 @@ static int __cpuinit msm_cpufreq_cpu_callback(struct notifier_block *nfb,
 	unsigned int cpu = (unsigned long)hcpu;
 	int rc;
 
+	/* Fail hotplug until this driver can get CPU clocks */
+	if (!hotplug_ready)
+		return NOTIFY_BAD;
+
 	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_ONLINE:
-		per_cpu(cpufreq_suspend, cpu).device_suspended = 0;
-		break;
-	case CPU_DOWN_PREPARE:
-		mutex_lock(&per_cpu(cpufreq_suspend, cpu).suspend_mutex);
-		per_cpu(cpufreq_suspend, cpu).device_suspended = 1;
-		mutex_unlock(&per_cpu(cpufreq_suspend, cpu).suspend_mutex);
-		break;
-	case CPU_DOWN_FAILED:
-		per_cpu(cpufreq_suspend, cpu).device_suspended = 0;
-		break;
 	/*
 	 * Scale down clock/power of CPU that is dead and scale it back up
 	 * before the CPU is brought up.
@@ -508,10 +506,40 @@ static int cpufreq_parse_dt(struct device *dev)
 	freq_table[i].index = i;
 	freq_table[i].frequency = CPUFREQ_TABLE_END;
 
+#ifdef CONFIG_CPU_VOLTAGE_TABLE
+	dts_freq_table =
+		devm_kzalloc(dev, (nf + 1) *
+			sizeof(struct cpufreq_frequency_table),
+			GFP_KERNEL);
+
+	if (!dts_freq_table)
+		return -ENOMEM;
+
+	for (i = 0, j = 0; i < nf; i++, j += 3)
+		dts_freq_table[i].frequency = data[j];
+	dts_freq_table[i].frequency = CPUFREQ_TABLE_END;
+#endif
+
 	devm_kfree(dev, data);
 
 	return 0;
 }
+
+#ifdef CONFIG_CPU_VOLTAGE_TABLE
+bool is_used_by_scaling(unsigned int freq)
+{
+	unsigned int i, cpu_freq;
+
+	for (i = 0; dts_freq_table[i].frequency != CPUFREQ_TABLE_END; i++) {
+		cpu_freq = dts_freq_table[i].frequency;
+		if (cpu_freq == CPUFREQ_ENTRY_INVALID)
+			continue;
+		if (freq == cpu_freq)
+			return true;
+	}
+	return false;
+}
+#endif
 
 #ifdef CONFIG_DEBUG_FS
 static int msm_cpufreq_show(struct seq_file *m, void *unused)
@@ -571,6 +599,7 @@ static int __init msm_cpufreq_probe(struct platform_device *pdev)
 
 	if (!cpu_clk[0])
 		return -ENODEV;
+	hotplug_ready = true;
 
 	ret = cpufreq_parse_dt(dev);
 	if (ret)
@@ -612,17 +641,32 @@ static struct platform_driver msm_cpufreq_plat_driver = {
 
 static int __init msm_cpufreq_register(void)
 {
-	int cpu;
+	int cpu, rc;
 
 	for_each_possible_cpu(cpu) {
 		mutex_init(&(per_cpu(cpufreq_suspend, cpu).suspend_mutex));
 		per_cpu(cpufreq_suspend, cpu).device_suspended = 0;
 	}
 
-	platform_driver_probe(&msm_cpufreq_plat_driver, msm_cpufreq_probe);
+	rc = platform_driver_probe(&msm_cpufreq_plat_driver,
+				   msm_cpufreq_probe);
+	if (rc < 0) {
+		/* Unblock hotplug if msm-cpufreq probe fails */
+		unregister_hotcpu_notifier(&msm_cpufreq_cpu_notifier);
+		for_each_possible_cpu(cpu)
+			mutex_destroy(&(per_cpu(cpufreq_suspend, cpu).
+					suspend_mutex));
+		return rc;
+	}
+
 	msm_cpufreq_wq = alloc_workqueue("msm-cpufreq", WQ_HIGHPRI, 0);
-	register_hotcpu_notifier(&msm_cpufreq_cpu_notifier);
 	return cpufreq_register_driver(&msm_cpufreq_driver);
 }
 
 device_initcall(msm_cpufreq_register);
+
+static int __init msm_cpufreq_early_register(void)
+{
+	return register_hotcpu_notifier(&msm_cpufreq_cpu_notifier);
+}
+core_initcall(msm_cpufreq_early_register);

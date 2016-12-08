@@ -58,7 +58,6 @@ static unsigned int input_boost_ms = 40;
 module_param(input_boost_ms, uint, 0644);
 
 static u64 last_input_time;
-#define MIN_INPUT_INTERVAL (150 * USEC_PER_MSEC)
 
 /*
  * The CPUFREQ_ADJUST notifier is used to override the current policy min to
@@ -78,14 +77,15 @@ static int boost_adjust_notify(struct notifier_block *nb, unsigned long val, voi
 	struct cpu_sync *s = &per_cpu(sync_info, cpu);
 	unsigned int b_min = s->boost_min;
 	unsigned int ib_min = s->input_boost_min;
-	unsigned int min;
+	unsigned int min, min_freq;
 
 	switch (val) {
 	case CPUFREQ_ADJUST:
 		if (!b_min && !ib_min)
 			break;
 
-		min = max(b_min, ib_min);
+		min_freq = max(b_min, ib_min);
+		min = min(min_freq, policy->max);
 
 		pr_debug("CPU%u policy min before boost: %u kHz\n",
 			 cpu, policy->min);
@@ -141,11 +141,14 @@ static int boost_mig_sync_thread(void *data)
 	unsigned long flags;
 
 	while(1) {
-		wait_event_interruptible(s->sync_wq, s->pending ||
+		ret = wait_event_interruptible(s->sync_wq, s->pending ||
 					kthread_should_stop());
 
 		if (kthread_should_stop())
 			break;
+
+		if (ret == -ERESTARTSYS)
+			continue;
 
 		spin_lock_irqsave(&s->lock, flags);
 		s->pending = false;
@@ -227,7 +230,7 @@ static struct notifier_block boost_migration_nb = {
 
 static void do_input_boost(struct work_struct *work)
 {
-	unsigned int i, ret;
+	unsigned int i, ret, freq;
 	struct cpu_sync *i_sync_info;
 	struct cpufreq_policy policy;
 
@@ -236,13 +239,20 @@ static void do_input_boost(struct work_struct *work)
 
 		i_sync_info = &per_cpu(sync_info, i);
 		ret = cpufreq_get_policy(&policy, i);
-		if (ret)
+		
+		if (ret) {
 			continue;
-		if (policy.cur >= input_boost_freq)
-			continue;
+		}
+		else {
+			pr_debug("Cannot get CPU info\n");
+			break;
+		}
+		// ensure, boost freq does never exceed max scaling freq
+			freq = max(input_boost_freq,policy.max);
+			policy.cur=max(policy.cur,freq);
 
 		cancel_delayed_work_sync(&i_sync_info->input_boost_rem);
-		i_sync_info->input_boost_min = input_boost_freq;
+		i_sync_info->input_boost_min = freq;
 		cpufreq_update_policy(i);
 		queue_delayed_work_on(i_sync_info->cpu, cpu_boost_wq,
 			&i_sync_info->input_boost_rem,
@@ -260,7 +270,7 @@ static void cpuboost_input_event(struct input_handle *handle,
 		return;
 
 	now = ktime_to_us(ktime_get());
-	if (now - last_input_time < MIN_INPUT_INTERVAL)
+	if ((now - last_input_time) < (input_boost_ms * USEC_PER_MSEC))
 		return;
 
 	if (work_pending(&input_boost_work))
